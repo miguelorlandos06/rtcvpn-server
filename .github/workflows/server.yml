@@ -1,0 +1,152 @@
+name: RTCVPN Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/server.yml'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duración en minutos (default 290 = ~5h)'
+        required: false
+        default: '290'
+  schedule:
+    # Backup: cada 5 horas si el auto-relanzar falla
+    - cron: '0 */5 * * *'
+
+jobs:
+  run-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    concurrency:
+      group: rtcvpn-server-run
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Build server
+        run: |
+          go build -o rtcvpn-server .
+          chmod +x rtcvpn-server
+          echo "Binary size: $(ls -lh rtcvpn-server | awk '{print $5}')"
+
+      - name: Check for active runs (skip if duplicate)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          # Listar runs en progreso del mismo workflow
+          ACTIVE=$(gh run list --repo "$REPO" --workflow=server.yml --status=in_progress --json databaseId,status --jq 'length' 2>/dev/null || echo "0")
+          QUEUED=$(gh run list --repo "$REPO" --workflow=server.yml --status=queued --json databaseId,status --jq 'length' 2>/dev/null || echo "0")
+          echo "Runs activos: $ACTIVE, en cola: $QUEUED"
+          TOTAL=$((ACTIVE + QUEUED))
+          # Si hay más de 1 run activo (este mismo), salir
+          if [ "$TOTAL" -gt 1 ]; then
+            echo "⚠️ Ya hay un run activo ($TOTAL). Saliendo para evitar duplicados."
+            echo "skip=true" >> $GITHUB_ENV
+            exit 0
+          fi
+          echo "✅ No hay runs duplicados. Continuando."
+          echo "skip=false" >> $GITHUB_ENV
+
+      - name: Run server for ~5 hours
+        if: env.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PHONES: ${{ secrets.PHONES }}
+        run: |
+          set -e
+          DURATION=${{ github.event.inputs.duration || '290' }}
+          PHONES_VAL="${PHONES:-5350256349,5350155246,5351417372,5351430352}"
+          echo "=== Iniciando servidor Go por ${DURATION} minutos ==="
+          echo "Phones: $PHONES_VAL"
+          echo "Puerto: 8080"
+
+          # Arrancar el servidor en background
+          ./rtcvpn-server --phones "$PHONES_VAL" --port 8080 > server.log 2>&1 &
+          SERVER_PID=$!
+          echo "Server PID: $SERVER_PID"
+
+          # Esperar a que arranque
+          sleep 15
+          if ! kill -0 $SERVER_PID 2>/dev/null; then
+            echo "❌ El servidor no arrancó. Log:"
+            cat server.log
+            exit 1
+          fi
+
+          # Verificar health
+          echo "=== Health check ==="
+          curl -sS --max-time 5 http://127.0.0.1:8080/health || echo "health check falló"
+          echo ""
+          echo "=== Status ==="
+          curl -sS --max-time 5 http://127.0.0.1:8080/status || echo "status check falló"
+          echo ""
+
+          # Log inicial
+          echo "=== Log del servidor (primeras 30 líneas) ==="
+          head -30 server.log
+
+          # Mantener el servidor corriendo por DURATION minutos
+          # En chunks de 5 min para no perder el paso
+          TOTAL_SECS=$((DURATION * 60))
+          CHUNK=$((5 * 60))
+          ELAPSED=0
+          while [ $ELAPSED -lt $TOTAL_SECS ]; do
+            sleep $CHUNK
+            ELAPSED=$((ELAPSED + CHUNK))
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "❌ Servidor murió a los ${ELAPSED}s"
+              tail -20 server.log
+              exit 1
+            fi
+            echo "✓ Servidor vivo (${ELAPSED}/${TOTAL_SECS}s)"
+            # Log de últimas líneas cada 30 min
+            if [ $((ELAPSED % 1800)) -eq 0 ]; then
+              echo "--- Status a los ${ELAPSED}s ---"
+              curl -sS --max-time 5 http://127.0.0.1:8080/status || true
+              echo ""
+            fi
+          done
+
+          echo "=== Tiempo cumplido, lanzando nuevo run ==="
+
+          # Lanzar nuevo run antes de morir
+          REPO="${{ github.repository }}"
+          gh workflow run server.yml --repo "$REPO" \
+            --field duration="${DURATION}" || echo "⚠️ No se pudo lanzar nuevo run (quizás cron lo haga)"
+
+          # Guardar el run ID del nuevo para referencia
+          sleep 5
+          NEW_RUN=$(gh run list --repo "$REPO" --workflow=server.yml --limit=1 --json databaseId,createdAt --jq '.[0]' 2>/dev/null || echo "?")
+          echo "Nuevo run lanzado: $NEW_RUN"
+
+          # Detener servidor limpiamente
+          echo "=== Deteniendo servidor ==="
+          kill $SERVER_PID 2>/dev/null || true
+          wait $SERVER_PID 2>/dev/null || true
+
+          # Log final
+          echo "=== Log final (últimas 30 líneas) ==="
+          tail -30 server.log
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: server.log
+          if-no-files-found: warn

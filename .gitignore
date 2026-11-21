@@ -1,0 +1,4 @@
+rtcvpn-server
+*.exe
+.env
+*.log
