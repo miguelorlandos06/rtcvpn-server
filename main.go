@@ -1,14 +1,14 @@
 // main.go — RTCVPN Server (Go). Servidor de túnel WebRTC sobre toDus.
 //
 // Arquitectura:
-// - Pool de 4 teléfonos toDus (JWT + XMPP + TURN creds).
-// - HTTP API: POST /connect asigna teléfono libre, POST /disconnect libera,
-//   GET /status estado del pool.
-// - Listener XMPP por teléfono: procesa mensajes "OFFER:..." del APK y
-//   responde "ANSWER:..." con el SDP.
-// - TURN siempre forzado (iceTransportPolicy=Relay).
-// - Si los 4 están ocupados, el APK se encola y recibe notificación XMPP
-//   "CHANNEL_FREE:<phone>" cuando uno se libera.
+//   - Pool de 4 teléfonos toDus (JWT + XMPP + TURN creds).
+//   - HTTP API: POST /connect asigna teléfono libre, POST /disconnect libera,
+//     GET /status estado del pool.
+//   - Listener XMPP por teléfono: procesa mensajes "OFFER:..." del APK y
+//     responde "ANSWER:..." con el SDP.
+//   - TURN siempre forzado (iceTransportPolicy=Relay).
+//   - Si los 4 están ocupados, el APK se encola y recibe notificación XMPP
+//     "CHANNEL_FREE:<phone>" cuando uno se libera.
 package main
 
 import (
@@ -24,8 +24,8 @@ import (
 )
 
 var (
-	pool     *PhonePool
-	tunnels  sync.Map // server_phone → *WebRtcTunnel
+	pool    *PhonePool
+	tunnels sync.Map // server_phone → *WebRtcTunnel
 )
 
 type connectReq struct {

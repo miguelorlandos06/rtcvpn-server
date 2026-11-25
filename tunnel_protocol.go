@@ -5,18 +5,18 @@ package main
 import "encoding/binary"
 
 const (
-	FrameOpen   byte = 0
-	FrameData   byte = 1
-	FrameClose  byte = 2
-	FrameErr    byte = 3
-	FrameOpened byte = 4
-	FramePing   byte = 5
-	FramePong   byte = 6
-	CtrlStreamID     = 0
-	MaxPayload       = 16384
-	headerLen        = 7
+	FrameOpen    byte = 0
+	FrameData    byte = 1
+	FrameClose   byte = 2
+	FrameErr     byte = 3
+	FrameOpened  byte = 4
+	FramePing    byte = 5
+	FramePong    byte = 6
+	CtrlStreamID      = 0
+	MaxPayload        = 16384
+	headerLen         = 7
 
-	ErrGeneral        byte = 1
+	ErrGeneral         byte = 1
 	ErrHostUnreachable byte = 2
 	ErrConnRefused     byte = 3
 	ErrConnTimeout     byte = 4

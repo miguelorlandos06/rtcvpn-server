@@ -30,11 +30,11 @@ type PhoneSlot struct {
 }
 
 type PhoneStatus struct {
-	Phone          string    `json:"phone"`
+	Phone          string     `json:"phone"`
 	State          PhoneState `json:"state"`
-	ApkPhone       string    `json:"apk_phone,omitempty"`
-	Since          time.Time `json:"since,omitempty"`
-	TokenExpiresAt int64     `json:"token_expires_at"`
+	ApkPhone       string     `json:"apk_phone,omitempty"`
+	Since          time.Time  `json:"since,omitempty"`
+	TokenExpiresAt int64      `json:"token_expires_at"`
 }
 
 type PhonePool struct {

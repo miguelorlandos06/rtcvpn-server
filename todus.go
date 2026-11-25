@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	authURL       = "https://auth.todus.cu/v2/auth/token"
-	phoneSecret   = "fake1234567890abcdef12345678" // UUID hardcodeado (sin guiones, 32 chars)
-	xmppHost      = "im.todus.cu"
-	xmppPort      = 1756
-	turnJID       = "tturn@im.todus.cu"
+	authURL     = "https://auth.todus.cu/v2/auth/token"
+	phoneSecret = "fake1234567890abcdef12345678" // UUID hardcodeado (sin guiones, 32 chars)
+	xmppHost    = "im.todus.cu"
+	xmppPort    = 1756
+	turnJID     = "tturn@im.todus.cu"
 )
 
 // TurnCreds — credenciales TURN devueltas por el server toDus.
@@ -187,14 +187,14 @@ func unescapeXML(s string) string {
 
 // XmppClient — sesión XMPP viva sobre TLS con loop de lectura.
 type XmppClient struct {
-	phone string
-	jid   string
-	token string
-	conn  *tls.Conn
+	phone   string
+	jid     string
+	token   string
+	conn    *tls.Conn
 	writeMu sync.Mutex
-	msgCh chan string // mensajes entrantes (body de <m>)
-	iqCh  chan string // IQ responses (XML completo)
-	done  chan struct{}
+	msgCh   chan string // mensajes entrantes (body de <m>)
+	iqCh    chan string // IQ responses (XML completo)
+	done    chan struct{}
 }
 
 // ConnectXmpp conecta, hace handshake (SASL PLAIN + bind + presence) y arranca el reader.
@@ -518,7 +518,7 @@ func (x *XmppClient) RecvMessage(timeout time.Duration) (string, bool) {
 	}
 }
 
-func (x *XmppClient) JID() string  { return x.jid }
+func (x *XmppClient) JID() string   { return x.jid }
 func (x *XmppClient) Phone() string { return x.phone }
 func (x *XmppClient) Token() string { return x.token }
 
