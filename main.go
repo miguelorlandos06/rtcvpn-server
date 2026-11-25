@@ -1,14 +1,18 @@
 // main.go — RTCVPN Server (Go). Servidor de túnel WebRTC sobre toDus.
 //
-// Arquitectura:
+// Arquitectura (v2 — señalización 100% XMPP):
 //   - Pool de 4 teléfonos toDus (JWT + XMPP + TURN creds).
-//   - HTTP API: POST /connect asigna teléfono libre, POST /disconnect libera,
-//     GET /status estado del pool.
-//   - Listener XMPP por teléfono: procesa mensajes "OFFER:..." del APK y
-//     responde "ANSWER:..." con el SDP.
-//   - TURN siempre forzado (iceTransportPolicy=Relay).
-//   - Si los 4 están ocupados, el APK se encola y recibe notificación XMPP
-//     "CHANNEL_FREE:<phone>" cuando uno se libera.
+//   - La APK NO usa HTTP contra el servidor: manda "CALL:<apk_phone>" por
+//     XMPP al número del servidor, el pool asigna un teléfono libre y
+//     responde "ACCEPT:{server_phone, server_jid, turn}" (o "BUSY:{position}"
+//     si todos ocupados → luego "CHANNEL_FREE:<phone>").
+//   - Listener XMPP por teléfono: procesa "CALL:..." y "OFFER:..." del APK y
+//     responde "ACCEPT:..."/"ANSWER:...".
+//   - TURN siempre forzado (iceTransportPolicy=Relay): solo se necesitan
+//     conexiones SALIENTES (im.todus.cu + TURN), ninguna IP pública del
+//     servidor ni puertos de entrada.
+//   - HTTP API local (127.0.0.1) solo para diagnóstico: /status, /health.
+//     POST /connect y /disconnect se mantienen por compatibilidad.
 package main
 
 import (
@@ -46,6 +50,18 @@ type errorResp struct {
 
 type disconnectReq struct {
 	ServerPhone string `json:"server_phone"`
+}
+
+// Respuestas XMPP del protocolo CALL (v2 — señalización 100% XMPP).
+type xmppAcceptResp struct {
+	ServerPhone string     `json:"server_phone"`
+	ServerJID   string     `json:"server_jid"`
+	Turn        *TurnCreds `json:"turn"`
+}
+
+type xmppBusyResp struct {
+	Position int    `json:"position"`
+	Message  string `json:"message"`
 }
 
 func main() {
@@ -185,6 +201,51 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCall procesa "CALL:<apk_phone>" recibido por XMPP: asigna un teléfono
+// libre del pool y responde ACCEPT (o BUSY + waitlist) a la APK.
+func handleCall(apkPhone, receiverPhone string) error {
+	if apkPhone == "" {
+		return fmt.Errorf("CALL sin teléfono")
+	}
+	xmpp := pool.GetXmpp(receiverPhone)
+	if xmpp == nil {
+		return fmt.Errorf("sin sesión XMPP para %s", receiverPhone)
+	}
+	apkJID := buildJID(apkPhone)
+
+	serverPhone, turn := pool.Acquire(apkPhone)
+	if serverPhone == "" {
+		// Todos ocupados: encolar y avisar por BUSY.
+		pos := pool.WaitlistPosition(apkPhone)
+		resp, _ := json.Marshal(xmppBusyResp{
+			Position: pos,
+			Message:  "Todos los canales están ocupados; se te avisará en cuanto quede uno libre.",
+		})
+		if err := xmpp.SendMessage(apkJID, "BUSY:"+string(resp)); err != nil {
+			return err
+		}
+		slog.Info("CALL encolado", "apk", apkJID, "posicion", pos)
+		return nil
+	}
+
+	resp, err := json.Marshal(xmppAcceptResp{
+		ServerPhone: serverPhone,
+		ServerJID:   buildJID(serverPhone),
+		Turn:        turn,
+	})
+	if err != nil {
+		pool.Release(serverPhone)
+		return err
+	}
+	if err := xmpp.SendMessage(apkJID, "ACCEPT:"+string(resp)); err != nil {
+		pool.Release(serverPhone)
+		return err
+	}
+	slog.Info("CALL aceptado", "apk", apkJID, "receiver", receiverPhone,
+		"assigned", serverPhone, "turn_user", turn.Username)
+	return nil
+}
+
 // notifyChannelFree envía un mensaje XMPP al APK phone: "CHANNEL_FREE:<server_phone>"
 func notifyChannelFree(serverPhone, apkPhone string) {
 	xmpp := pool.GetXmpp(serverPhone)
@@ -225,8 +286,12 @@ func xmppListenerLoop(phone string) {
 	}
 }
 
-// processSignalingMessage procesa mensajes OFFER/CLOSED del APK.
+// processSignalingMessage procesa mensajes CALL/OFFER/CLOSED del APK.
 func processSignalingMessage(msg, serverPhone string) error {
+	if strings.HasPrefix(msg, "CALL:") {
+		apkPhone := normalizePhone(strings.TrimSpace(msg[5:]))
+		return handleCall(apkPhone, serverPhone)
+	}
 	if strings.HasPrefix(msg, "OFFER:") {
 		sdp := msg[6:]
 		slog.Info("OFFER recibido", "server_phone", serverPhone, "sdp_len", len(sdp))
@@ -240,6 +305,12 @@ func processSignalingMessage(msg, serverPhone string) error {
 		s.mu.RUnlock()
 		if turn == nil {
 			return fmt.Errorf("sin TURN creds para %s", serverPhone)
+		}
+		// Re-OFFER (rellamada de la APK): cerrar el túnel anterior del slot.
+		if v, loaded := tunnels.Load(serverPhone); loaded && v != nil {
+			slog.Info("cerrando túnel anterior para re-OFFER", "server_phone", serverPhone)
+			v.(*WebRtcTunnel).Close()
+			tunnels.Delete(serverPhone)
 		}
 		// Crear tunnel answerer
 		tunnel, err := NewAnswerer(turn)

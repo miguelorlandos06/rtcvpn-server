@@ -102,34 +102,17 @@ jobs:
           echo "=== Log del servidor (primeras 30 líneas) ==="
           head -30 server.log
 
-          # ── Publicar IP pública para el auto-descubrimiento de la APK ──
-          # La APK lee raw.githubusercontent.com/<repo>/server-ip/server-ip.json
-          # para encontrar el servidor sin configuración manual.
-          PUBLIC_IP="$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me || true)"
-          if [ -n "$PUBLIC_IP" ]; then
-            NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "=== IP pública del runner: $PUBLIC_IP ==="
-            IP_DIR="$(mktemp -d)"
-            printf '{"ip": "%s", "port": 8080, "updated": "%s"}\n' "$PUBLIC_IP" "$NOW" > "$IP_DIR/server-ip.json"
-            (
-              cd "$IP_DIR"
-              git init -q .
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git checkout -q -b server-ip
-              git add server-ip.json
-              git commit -qm "server IP $PUBLIC_IP @ $NOW"
-              git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:server-ip
-            ) && echo "✅ server-ip.json publicado en la rama server-ip" || echo "⚠️ No se pudo publicar la IP"
-            # Aviso en tiempo real al grupo de Telegram
-            if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_GROUP_ID:-}" ]; then
-              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                -H "Content-Type: application/json" \
-                -d "{\"chat_id\": \"${TG_GROUP_ID}\", \"parse_mode\": \"HTML\", \"text\": \"🟢 <b>RTCVPN Server activo</b>\\n<b>http://${PUBLIC_IP}:8080</b>\\nLa APK lo detecta automáticamente (actualizado ${NOW}).\"}" || echo "⚠️ aviso Telegram falló"
-              echo ""
-            fi
-          else
-            echo "⚠️ No se pudo obtener la IP pública del runner"
+          # ── Aviso en tiempo real al grupo de Telegram ──
+          # v2: la señalización es 100% XMPP — la APK llama por XMPP al número
+          # del servidor (CALL → ACCEPT → OFFER/ANSWER por XMPP, TURN + DataChannel).
+          # Ya NO se publica ninguna IP del runner: el servidor solo necesita
+          # conexiones salientes (im.todus.cu + TURN de toDus).
+          NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_GROUP_ID:-}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{\"chat_id\": \"${TG_GROUP_ID}\", \"parse_mode\": \"HTML\", \"text\": \"🟢 <b>RTCVPN Server activo</b> (señalización 100% XMPP)\\nPool listo: la APK envía CALL por XMPP y recibe ACCEPT con TURN.\\nArrancado ${NOW} (run ${GITHUB_RUN_NUMBER}).\"}" || echo "⚠️ aviso Telegram falló"
+            echo ""
           fi
 
           # Mantener el servidor corriendo por DURATION minutos

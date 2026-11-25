@@ -110,8 +110,22 @@ func (p *PhonePool) InitPhone(s *PhoneSlot) error {
 }
 
 // Acquire asigna un teléfono libre al APK user. Devuelve (server_phone, turn_creds).
-// Si todos ocupados, encola al APK y devuelve nil.
+// Si todos ocupados, encola al APK y devuelve "".
+// Si el APK ya tenía un slot asignado (rellamada tras CHANNEL_FREE, reintento
+// o reconexión), devuelve el MISMO slot para no desperdiciar canales.
 func (p *PhonePool) Acquire(apkPhone string) (string, *TurnCreds) {
+	// Slot ya asignado a este APK (Connecting o Busy): reutilizar.
+	for _, s := range p.slots {
+		s.mu.RLock()
+		if s.apkPhone == apkPhone && s.state != StateError {
+			phone := s.Phone
+			turn := s.turnCreds
+			s.mu.RUnlock()
+			slog.Info("reutilizando slot del APK", "server_phone", phone, "apk", apkPhone, "state", p.slotState(phone))
+			return phone, turn
+		}
+		s.mu.RUnlock()
+	}
 	for _, s := range p.slots {
 		s.mu.RLock()
 		if s.state == StateFree {
@@ -225,6 +239,30 @@ func (p *PhonePool) Waitlist() []string {
 	cp := make([]string, len(p.waitlist))
 	copy(cp, p.waitlist)
 	return cp
+}
+
+// WaitlistPosition devuelve la posición (1-based) del APK en la lista de
+// espera, o 0 si no está encolado.
+func (p *PhonePool) WaitlistPosition(apkPhone string) int {
+	p.wlMu.Lock()
+	defer p.wlMu.Unlock()
+	for i, w := range p.waitlist {
+		if w == apkPhone {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// slotState devuelve el estado de un teléfono (para logging).
+func (p *PhonePool) slotState(phone string) PhoneState {
+	s := p.find(phone)
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state
 }
 
 // MaybeRevalidate revalida el JWT si está cerca de expirar (<10 min).
