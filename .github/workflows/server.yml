@@ -67,6 +67,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PHONES: ${{ secrets.PHONES }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_GROUP_ID: ${{ secrets.TG_GROUP_ID }}
         run: |
           set -e
           DURATION=${{ github.event.inputs.duration || '290' }}
@@ -99,6 +101,36 @@ jobs:
           # Log inicial
           echo "=== Log del servidor (primeras 30 líneas) ==="
           head -30 server.log
+
+          # ── Publicar IP pública para el auto-descubrimiento de la APK ──
+          # La APK lee raw.githubusercontent.com/<repo>/server-ip/server-ip.json
+          # para encontrar el servidor sin configuración manual.
+          PUBLIC_IP="$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me || true)"
+          if [ -n "$PUBLIC_IP" ]; then
+            NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "=== IP pública del runner: $PUBLIC_IP ==="
+            IP_DIR="$(mktemp -d)"
+            printf '{"ip": "%s", "port": 8080, "updated": "%s"}\n' "$PUBLIC_IP" "$NOW" > "$IP_DIR/server-ip.json"
+            (
+              cd "$IP_DIR"
+              git init -q .
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git checkout -q -b server-ip
+              git add server-ip.json
+              git commit -qm "server IP $PUBLIC_IP @ $NOW"
+              git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:server-ip
+            ) && echo "✅ server-ip.json publicado en la rama server-ip" || echo "⚠️ No se pudo publicar la IP"
+            # Aviso en tiempo real al grupo de Telegram
+            if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_GROUP_ID:-}" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "{\"chat_id\": \"${TG_GROUP_ID}\", \"parse_mode\": \"HTML\", \"text\": \"🟢 <b>RTCVPN Server activo</b>\\n<b>http://${PUBLIC_IP}:8080</b>\\nLa APK lo detecta automáticamente (actualizado ${NOW}).\"}" || echo "⚠️ aviso Telegram falló"
+              echo ""
+            fi
+          else
+            echo "⚠️ No se pudo obtener la IP pública del runner"
+          fi
 
           # Mantener el servidor corriendo por DURATION minutos
           # En chunks de 5 min para no perder el paso
