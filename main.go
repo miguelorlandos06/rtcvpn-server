@@ -263,21 +263,26 @@ func notifyChannelFree(serverPhone, apkPhone string) {
 }
 
 // xmppListenerLoop — loop principal del listener por teléfono.
+// Si la sesión muere (kick de otra sesión, corte de red), se reconecta
+// automáticamente conservando el estado del slot (ocupación).
 func xmppListenerLoop(phone string) {
 	slog.Info("XMPP listener arrancado", "phone", phone)
 	for {
 		xmpp := pool.GetXmpp(phone)
 		if xmpp == nil || xmpp.IsClosed() {
-			slog.Warn("XMPP no disponible, reintentando", "phone", phone)
+			slog.Warn("XMPP no disponible, reconectando", "phone", phone)
 			time.Sleep(5 * time.Second)
 			if s := pool.find(phone); s != nil {
-				pool.MaybeRevalidate(s)
+				if err := pool.ReconnectSession(s); err != nil {
+					slog.Error("reconexión XMPP falló", "phone", phone, "err", err)
+					time.Sleep(15 * time.Second)
+				}
 			}
 			continue
 		}
 		msg, ok := xmpp.RecvMessage(60 * time.Second)
 		if !ok {
-			slog.Debug("XMPP sin mensajes (60s)", "phone", phone)
+			// msgCh cerrado: sesión muerta; el próximo giro la detecta.
 			continue
 		}
 		if err := processSignalingMessage(msg, phone); err != nil {

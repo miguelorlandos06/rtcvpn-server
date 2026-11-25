@@ -265,6 +265,41 @@ func (p *PhonePool) slotState(phone string) PhoneState {
 	return s.state
 }
 
+// ReconnectSession reconecta (login + XMPP + TURN) conservando el estado
+// del slot (ocupación y APK asignado). La usa el listener cuando la sesión
+// XMPP muere (kick, corte de red, cierre del servidor).
+func (p *PhonePool) ReconnectSession(s *PhoneSlot) error {
+	slog.Info("reconectando sesión XMPP", "phone", s.Phone)
+	jwt, err := loginWithPhoneOnly(s.Phone)
+	if err != nil {
+		return err
+	}
+	exp := jwtExp(jwt)
+	xmpp, err := ConnectXmpp(s.Phone, jwt)
+	if err != nil {
+		return err
+	}
+	turn, err := xmpp.FetchTurnCreds()
+	if err != nil {
+		slog.Warn("reconexión: TURN fetch falló (conservando anteriores)", "phone", s.Phone, "err", err)
+		turn = nil
+	}
+	s.mu.Lock()
+	old := s.xmpp
+	s.jwt = jwt
+	s.jwtExp = exp
+	s.xmpp = xmpp
+	if turn != nil {
+		s.turnCreds = turn
+	}
+	s.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	slog.Info("sesión XMPP restaurada", "phone", s.Phone, "jwt_exp", exp)
+	return nil
+}
+
 // MaybeRevalidate revalida el JWT si está cerca de expirar (<10 min).
 func (p *PhonePool) MaybeRevalidate(s *PhoneSlot) bool {
 	s.mu.RLock()

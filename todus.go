@@ -187,14 +187,16 @@ func unescapeXML(s string) string {
 
 // XmppClient — sesión XMPP viva sobre TLS con loop de lectura.
 type XmppClient struct {
-	phone   string
-	jid     string
-	token   string
-	conn    *tls.Conn
-	writeMu sync.Mutex
-	msgCh   chan string // mensajes entrantes (body de <m>)
-	iqCh    chan string // IQ responses (XML completo)
-	done    chan struct{}
+	phone    string
+	jid      string
+	token    string
+	conn     *tls.Conn
+	writeMu  sync.Mutex
+	msgCh    chan string // mensajes entrantes (body de <m>)
+	iqCh     chan string // IQ responses (XML completo)
+	done     chan struct{}
+	dead     chan struct{} // cerrado cuando el reader/escritura muere
+	deadOnce sync.Once
 }
 
 // ConnectXmpp conecta, hace handshake (SASL PLAIN + bind + presence) y arranca el reader.
@@ -232,6 +234,7 @@ func ConnectXmpp(phone, token string) (*XmppClient, error) {
 		msgCh: make(chan string, 256),
 		iqCh:  make(chan string, 64),
 		done:  make(chan struct{}),
+		dead:  make(chan struct{}),
 	}
 
 	// Handshake
@@ -242,6 +245,9 @@ func ConnectXmpp(phone, token string) (*XmppClient, error) {
 
 	// Reader loop en goroutine
 	go x.readLoop()
+	// Latido cada 45 s (espacio en blanco) para mantener viva la sesión
+	// contra timeouts de NAT/toDus — igual que hace la APK.
+	go x.heartbeatLoop()
 
 	slog.Info("XMPP conectado y listo", "jid", jid)
 	return x, nil
@@ -354,6 +360,8 @@ func truncate(s string, n int) string {
 }
 
 // readLoop — procesa stanzas entrantes y las dispatcha a msgCh/iqCh.
+// El silencio (>90 s sin bytes) NO mata la sesión: el heartbeat la mantiene
+// viva y solo los errores reales de transporte la cierran (markDead).
 func (x *XmppClient) readLoop() {
 	br := bufio.NewReader(x.conn)
 	var accum strings.Builder
@@ -361,15 +369,23 @@ func (x *XmppClient) readLoop() {
 		select {
 		case <-x.done:
 			return
+		case <-x.dead:
+			return
 		default:
 		}
-		x.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		x.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		b, err := br.ReadByte()
 		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue // silencio: no es error, el latido mantiene la sesión
+			}
 			slog.Warn("XMPP reader fin", "jid", x.jid, "err", err)
-			close(x.msgCh)
-			close(x.iqCh)
+			x.markDead()
 			return
+		}
+		// Espacios en blanco (latidos propios o del servidor): ignorar.
+		if b == ' ' || b == '\n' || b == '\r' || b == '\t' {
+			continue
 		}
 		accum.WriteByte(b)
 		for {
@@ -382,6 +398,35 @@ func (x *XmppClient) readLoop() {
 			x.dispatchStanza(stanza)
 		}
 	}
+}
+
+// heartbeatLoop — envía un espacio en blanco cada 45 s para que toDus/NAT
+// no recorte la sesión (mismo mecanismo que la APK).
+func (x *XmppClient) heartbeatLoop() {
+	for {
+		time.Sleep(45 * time.Second)
+		select {
+		case <-x.done:
+			return
+		case <-x.dead:
+			return
+		default:
+		}
+		if err := x.writeRaw(" "); err != nil {
+			x.markDead()
+			return
+		}
+	}
+}
+
+// markDead cierra dead/msgCh/iqCh UNA sola vez: el listener detectará la
+// muerte vía IsClosed() y reconectará.
+func (x *XmppClient) markDead() {
+	x.deadOnce.Do(func() {
+		close(x.dead)
+		close(x.msgCh)
+		close(x.iqCh)
+	})
 }
 
 func (x *XmppClient) dispatchStanza(stanza string) {
@@ -522,10 +567,12 @@ func (x *XmppClient) JID() string   { return x.jid }
 func (x *XmppClient) Phone() string { return x.phone }
 func (x *XmppClient) Token() string { return x.token }
 
-// IsClosed indica si la sesión XMPP está cerrada.
+// IsClosed indica si la sesión XMPP está cerrada (explícita o muerta).
 func (x *XmppClient) IsClosed() bool {
 	select {
 	case <-x.done:
+		return true
+	case <-x.dead:
 		return true
 	default:
 		return false
@@ -539,4 +586,5 @@ func (x *XmppClient) Close() {
 		close(x.done)
 	}
 	x.conn.Close()
+	x.markDead() // asegura que el listener detecte el cierre
 }
