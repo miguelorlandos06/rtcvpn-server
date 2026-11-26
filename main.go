@@ -374,10 +374,12 @@ func processSignalingMessage(msg, serverPhone string) error {
 		if s == nil {
 			return fmt.Errorf("phone %s no encontrado", serverPhone)
 		}
-		s.mu.RLock()
-		turn := s.turnCreds
+		// FIX TURN expirada: las creds del slot pueden llevar horas cacheadas
+		// (TTL real 1 h) — refrescar si está por expirar ANTES de crear el
+		// answerer, o el ANSWER sale sin candidatos ICE y el DataChannel del
+		// cliente nunca abre.
+		turn := pool.MaybeRefreshTurn(s)
 		apkPhone := s.apkPhone
-		s.mu.RUnlock()
 		if turn == nil {
 			return fmt.Errorf("sin TURN creds para %s", serverPhone)
 		}
