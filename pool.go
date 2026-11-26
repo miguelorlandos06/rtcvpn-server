@@ -3,7 +3,10 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +28,7 @@ type PhoneSlot struct {
 	xmpp      *XmppClient
 	state     PhoneState
 	turnCreds *TurnCreds
+	turnExp   int64  // expiry unix de la cred TURN (del username "exp:key")
 	apkPhone  string // cuando está busy/connecting, el APK user asignado
 	since     time.Time
 }
@@ -103,10 +107,68 @@ func (p *PhonePool) InitPhone(s *PhoneSlot) error {
 	s.jwtExp = exp
 	s.xmpp = xmpp
 	s.turnCreds = turn
+	s.turnExp = turnExpiry(turn)
 	s.state = StateFree
 	s.mu.Unlock()
-	slog.Info("teléfono listo", "phone", s.Phone, "jwt_exp", exp)
+	slog.Info("teléfono listo", "phone", s.Phone, "jwt_exp", exp,
+		"turn_exp", s.turnExp)
 	return nil
+}
+
+// turnExpiry extrae el expiry unix del username de la cred TURN
+// (formato coturn de toDus: "unix_expiry:key"). 0 si no se puede parsear.
+func turnExpiry(turn *TurnCreds) int64 {
+	if turn == nil || turn.Username == "" {
+		return 0
+	}
+	parts := strings.SplitN(turn.Username, ":", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	exp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return exp
+}
+
+// RefreshTurn pide creds TURN nuevas usando la sesión XMPP viva del slot.
+func (p *PhonePool) RefreshTurn(s *PhoneSlot) (*TurnCreds, error) {
+	xmpp := p.GetXmpp(s.Phone)
+	if xmpp == nil {
+		return nil, fmt.Errorf("sin sesión XMPP para %s", s.Phone)
+	}
+	turn, err := xmpp.FetchTurnCreds()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.turnCreds = turn
+	s.turnExp = turnExpiry(turn)
+	s.mu.Unlock()
+	slog.Info("creds TURN refrescadas", "phone", s.Phone, "turn_exp", s.turnExp)
+	return turn, nil
+}
+
+// MaybeRefreshTurn refresca la cred TURN si expira en <5 min (o ya expiró).
+// FIX: el pool cacheaba las creds del arranque durante toda la vida del
+// proceso (hasta 5 h con el runner de Actions). Tras 1 h (TTL real) coturn
+// responde 401: el ANSWER del OFFER salía SIN candidatos ICE y el
+// DataChannel nunca abría (el cliente muere esperando). Refrescar por TTL.
+func (p *PhonePool) MaybeRefreshTurn(s *PhoneSlot) *TurnCreds {
+	s.mu.RLock()
+	exp := s.turnExp
+	turn := s.turnCreds
+	s.mu.RUnlock()
+	if exp == 0 || time.Now().Add(5*time.Minute).Unix() < exp {
+		return turn
+	}
+	slog.Info("cred TURN por expirar/expirada — refrescando", "phone", s.Phone)
+	if fresh, err := p.RefreshTurn(s); err == nil {
+		return fresh
+	}
+	slog.Error("refresh TURN falló (siguiendo con las viejas)", "phone", s.Phone, "err", "")
+	return turn
 }
 
 // Acquire asigna un teléfono libre al APK user. Devuelve (server_phone, turn_creds).
@@ -283,7 +345,7 @@ func (p *PhonePool) ReconnectSession(s *PhoneSlot) error {
 	if err != nil {
 		slog.Warn("reconexión: TURN fetch falló (conservando anteriores)", "phone", s.Phone, "err", err)
 		turn = nil
-	}
+	} // las creds viejas podrían estar expiradas: se refrescan por MaybeRefreshTurn
 	s.mu.Lock()
 	old := s.xmpp
 	s.jwt = jwt
